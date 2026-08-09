@@ -27,9 +27,7 @@ docker run --rm -it \
     -v "$PROJECT_DIR:/workspace" \
     -v "$CLAUDE_STATE:/root/.claude" \
     -e CLAUDE_CONFIG_DIR=/root/.claude \
-    -e UV_PROJECT_ENVIRONMENT=/root/venv \
-    -v claude-uv-cache:/root/.cache/uv \
-    -v claude-python:/root/.local/share/uv \
+    -v claude-pyenv-versions:/root/.pyenv/versions \
     -w /workspace \
     "$IMAGE" \
     bash -lc '
@@ -45,12 +43,32 @@ docker run --rm -it \
 
         if [ -f pyproject.toml ]; then
             echo "🐍 Python project detected"
-            echo "📦 uv sync..."
-            uv sync
-            # активируем venv: теперь python/pytest/claude видят его по умолчанию
-            export VIRTUAL_ENV=/root/venv
-            export PATH="/root/venv/bin:$PATH"
-            echo; echo "🐍 Python:"; python --version; echo
+
+            # версия из .python-version (или .python_version); tr -cd оставляет только
+            # цифры и точки — переживает BOM/CRLF/UTF-16. Пусто -> системный Python.
+            PYVER=""
+            for f in .python-version .python_version; do
+                [ -f "$f" ] || continue
+                PYVER="$(tr -cd "0-9." < "$f")"
+                [ -n "$PYVER" ] && break
+            done
+
+            if [ -n "$PYVER" ]; then
+                echo "🐍 pyenv: ставлю Python $PYVER (первый раз компилируется, потом из кэша)..."
+                pyenv install -s "$PYVER"
+                pyenv global "$PYVER"
+            else
+                echo "🐍 .python-version не найден — беру системный Python"
+                pyenv global system
+            fi
+
+            echo; echo "🐍 Python:"; python --version
+            echo "📦 poetry install --no-root (без venv, прямо в этот Python)..."
+            # --no-root: ставим только зависимости, не сам проект как пакет
+            # (в app-репозиториях пакета с именем проекта нет — poetry иначе падает)
+            poetry install --no-root
+            pyenv rehash   # шимы для консольных скриптов (pytest, ruff, ...)
+            echo
         else
             echo "ℹ️  No pyproject.toml found"; echo
         fi

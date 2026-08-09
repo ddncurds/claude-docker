@@ -1,9 +1,10 @@
 # claude-docker
 
 Изолированное окружение для **Claude Code** на macOS: одна команда `claude-docker`
-поднимает одноразовый контейнер (Ubuntu 24.04) с `uv`, Python, git и набором CLI-инструментов,
+поднимает одноразовый контейнер (Ubuntu 24.04) с `pyenv`, `poetry`, git и набором CLI-инструментов,
 монтирует текущую папку проекта в `/workspace` и запускает Claude Code. После выхода контейнер
-удаляется, но логин, история, настройки Claude и кэш uv/Python сохраняются.
+удаляется, но логин, история, настройки Claude и скомпилированные Python (с установленными в них
+зависимостями) сохраняются.
 
 ---
 
@@ -35,10 +36,10 @@
 
 | Слой | За что отвечает | Где живёт |
 | --- | --- | --- |
-| `Dockerfile` | Что умеет окружение (Ubuntu + инструменты + uv + Claude Code) | `~/.claude-docker/Dockerfile` |
-| `pyproject.toml` | Что нужно проекту (версия Python + зависимости) | в проекте, на Mac |
+| `Dockerfile` | Что умеет окружение (Ubuntu + инструменты + pyenv + poetry + Claude Code) | `~/.claude-docker/Dockerfile` |
+| `.python-version` + `pyproject.toml` | Что нужно проекту (версия Python + зависимости) | в проекте, на Mac |
 | Состояние Claude | Авторизация, история, настройки, permissions, skills, hooks | `~/.claude-docker/state` |
-| Docker volumes | Кэш uv и скачанные Python | `claude-uv-cache`, `claude-python` |
+| Docker volume | Скомпилированные pyenv-Python (+ установленные в них зависимости) | `claude-pyenv-versions` |
 | `/workspace` | Текущий проект с Mac (bind-mount) | папка проекта |
 
 Осознанно **не** монтируются `~/.ssh` и `~/.gitconfig` — ключи остаются на Mac.
@@ -51,14 +52,18 @@
 - **Состояние контейнера отдельно от Mac'овского `~/.claude`.** На macOS Claude Code хранит токен
   в Keychain (недоступен из Linux) и удаляет файловый `.credentials.json`; общий каталог давал бы
   постоянные перелогины.
-- **venv вне bind-mount** (`/root/venv`) — на Mac не попадает нерабочий linux-venv, нет медленной
-  записи в шару. venv активируется при старте, поэтому `python`/`pytest` доступны напрямую.
+- **Без отдельного venv** (`POETRY_VIRTUALENVS_CREATE=false`) — Poetry ставит зависимости прямо в
+  активный pyenv-Python, `python`/`pytest` доступны через шимы pyenv напрямую. На Mac не попадает
+  нерабочий linux-venv, нет медленной записи в bind-mount.
+- **pyenv компилирует CPython из исходников** — первая установка версии занимает минуты, но и сам
+  Python, и установленные в него зависимости кэшируются в volume `claude-pyenv-versions`, поэтому
+  повторные запуски мгновенны.
 
 ---
 
 ## Предусловия
 
-Только **Docker Desktop** (установлен и запущен). uv и Python на Mac не нужны.
+Только **Docker Desktop** (установлен и запущен). pyenv, Poetry и Python на Mac не нужны.
 
 ```bash
 docker info >/dev/null 2>&1 && echo "Docker OK" || echo "Запусти Docker Desktop"
@@ -89,17 +94,32 @@ RUN apt-get update && apt-get install -y \
     tesseract-ocr tesseract-ocr-rus \
     \
     tshark tcpdump iproute2 \
+    \
+    # зависимости для сборки CPython через pyenv (компиляция из исходников)
+    make libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
+    libsqlite3-dev libncurses-dev libffi-dev liblzma-dev \
+    xz-utils tk-dev \
+    \
+    # интерпретатор для самого Poetry + fallback, когда версия не запинена
+    # python-is-python3: чтобы команда `python` существовала (в Ubuntu только python3)
+    python3 python3-venv python3-dev python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+# pyenv — управление версиями Python. Компиляция кэшируется в volume /root/.pyenv/versions.
+ENV PYENV_ROOT=/root/.pyenv
+RUN curl -fsSL https://pyenv.run | bash
+ENV PATH="/root/.pyenv/bin:/root/.pyenv/shims:$PATH"
 
-# Claude Code (нативный установщик: бинарь в /root/.local/bin, не в /root/.claude)
-RUN curl -fsSL https://claude.ai/install.sh | bash
+# Poetry (официальный установщик: бинарь в /root/.local/bin) + Claude Code (туда же)
+RUN curl -sSL https://install.python-poetry.org | python3 - \
+    && curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/root/.local/bin:$PATH"
 
-# venv собирается копированием (кэш uv на отдельном volume, hardlink невозможен)
-ENV UV_LINK_MODE=copy
+# без venv: Poetry ставит зависимости прямо в активный pyenv-Python.
+# IN_PROJECT=false — чтобы Poetry НЕ подхватывал и не трогал локальный
+# /workspace/.venv (это мак-овский venv с хоста, ему в контейнере делать нечего).
+ENV POETRY_VIRTUALENVS_CREATE=false \
+    POETRY_VIRTUALENVS_IN_PROJECT=false
 
 WORKDIR /workspace
 CMD ["bash"]
@@ -139,9 +159,7 @@ docker run --rm -it \
     -v "$PROJECT_DIR:/workspace" \
     -v "$CLAUDE_STATE:/root/.claude" \
     -e CLAUDE_CONFIG_DIR=/root/.claude \
-    -e UV_PROJECT_ENVIRONMENT=/root/venv \
-    -v claude-uv-cache:/root/.cache/uv \
-    -v claude-python:/root/.local/share/uv \
+    -v claude-pyenv-versions:/root/.pyenv/versions \
     -w /workspace \
     "$IMAGE" \
     bash -lc '
@@ -157,12 +175,32 @@ docker run --rm -it \
 
         if [ -f pyproject.toml ]; then
             echo "🐍 Python project detected"
-            echo "📦 uv sync..."
-            uv sync
-            # активируем venv: теперь python/pytest/claude видят его по умолчанию
-            export VIRTUAL_ENV=/root/venv
-            export PATH="/root/venv/bin:$PATH"
-            echo; echo "🐍 Python:"; python --version; echo
+
+            # версия из .python-version (или .python_version); tr -cd оставляет только
+            # цифры и точки — переживает BOM/CRLF/UTF-16. Пусто -> системный Python.
+            PYVER=""
+            for f in .python-version .python_version; do
+                [ -f "$f" ] || continue
+                PYVER="$(tr -cd "0-9." < "$f")"
+                [ -n "$PYVER" ] && break
+            done
+
+            if [ -n "$PYVER" ]; then
+                echo "🐍 pyenv: ставлю Python $PYVER (первый раз компилируется, потом из кэша)..."
+                pyenv install -s "$PYVER"
+                pyenv global "$PYVER"
+            else
+                echo "🐍 .python-version не найден — беру системный Python"
+                pyenv global system
+            fi
+
+            echo; echo "🐍 Python:"; python --version
+            echo "📦 poetry install --no-root (без venv, прямо в этот Python)..."
+            # --no-root: ставим только зависимости, не сам проект как пакет
+            # (в app-репозиториях пакета с именем проекта нет — poetry иначе падает)
+            poetry install --no-root
+            pyenv rehash   # шимы для консольных скриптов (pytest, ruff, ...)
+            echo
         else
             echo "ℹ️  No pyproject.toml found"; echo
         fi
@@ -185,21 +223,30 @@ cat > ~/.claude-docker/state/CLAUDE.md << 'EOF'
 
 Ты работаешь ВНУТРИ одноразового Docker-контейнера (Ubuntu 24.04), а не на хост-Mac.
 - Проект примонтирован в `/workspace` (= папка на Mac). Правки файлов тут сохраняются на хосте.
-- Python управляется `uv`. Системный python и pip не использовать.
+- Версиями Python управляет `pyenv`, зависимостями — `poetry`. Системный pip не использовать.
 
-## Python / виртуальное окружение
-- venv находится в `/root/venv` (переменная `UV_PROJECT_ENVIRONMENT=/root/venv`).
-- Оно УЖЕ активировано при старте: выставлены `VIRTUAL_ENV=/root/venv` и `/root/venv/bin` в начале `PATH`.
-- Поэтому вызывай `python`, `pytest`, `ruff` и т.д. напрямую — они берутся из venv.
-  Проверка: `which python` → `/root/venv/bin/python`, `echo $VIRTUAL_ENV` → `/root/venv`.
-- НЕ создавай `.venv` в `/workspace`, не переопределяй интерпретатор, не активируй venv заново.
-- `pyproject.toml` и `uv.lock` лежат в `/workspace` (на Mac) — их изменения сохраняются.
+## Python — без отдельного venv
+- Виртуального окружения НЕТ (`POETRY_VIRTUALENVS_CREATE=false`). Poetry ставит зависимости
+  прямо в активный pyenv-Python. `python`/`pytest`/`ruff` берутся через шимы pyenv.
+- Проверка: `which python` → `/root/.pyenv/shims/python`, `python --version` → версия проекта.
+- НЕ создавай/не трогай `.venv` в `/workspace` (это мак-овский venv с хоста, `POETRY_VIRTUALENVS_IN_PROJECT=false`
+  велит Poetry его игнорировать), не зови `poetry shell`, не переключай интерпретатор вручную.
+- `pyproject.toml` и `poetry.lock` лежат в `/workspace` (на Mac) — их изменения сохраняются.
+
+## Версия Python
+- Версию задаёт проект: файл `.python-version` (или `.python_version`) с полной версией, напр. `3.11.6`.
+- При старте `start.sh` читает его, делает `pyenv install -s <ver>` (компиляция кэшируется в volume
+  `claude-pyenv-versions`) и `pyenv global <ver>`.
+- Без `.python-version` берётся системный `python3` (3.12) через `pyenv global system`.
+- Хочешь другую версию — правь `.python-version` (на Mac) и перезапусти контейнер.
 
 ## Зависимости
-- Добавить пакет: `uv add <pkg>` (правит pyproject.toml + uv.lock, ставит в venv).
-- Синхронизировать по локу: `uv sync`.
-- venv эфемерный (контейнер с `--rm`): установка мимо uv (`pip install`) не переживёт перезапуск —
-  всегда используй `uv add` / `uv sync`.
+- Добавить пакет: `poetry add <pkg>` (правит pyproject.toml + poetry.lock, ставит в текущий Python).
+  После установки консольных скриптов может понадобиться `pyenv rehash`.
+- Установить по локу: `poetry install --no-root` (в контейнере ставим только зависимости, не сам
+  проект как пакет — так стартует `start.sh`).
+- Для запиненной версии зависимости лежат в site-packages внутри volume и переживают перезапуск;
+  для системного Python (без пина) — нет. Установка мимо poetry (`pip install`) не переживёт `--rm`.
 
 ## Границы
 - `~/.ssh` и `~/.gitconfig` в контейнер намеренно НЕ примонтированы — их здесь нет.
@@ -259,33 +306,46 @@ claude-docker
 
 ## Python и виртуальное окружение
 
-Версия Python задаётся проектом:
+Версия Python задаётся файлом `.python-version` (или `.python_version`) в корне проекта — полная
+версия, кодировка/переводы строк не важны (из файла берутся только цифры и точки):
 
-```toml
-[project]
-requires-python = ">=3.11,<3.12"
 ```
+3.11.6
+```
+
+Зависимости — как обычно в Poetry, через `[tool.poetry]` в `pyproject.toml`. Без `.python-version`
+берётся системный `python3` образа (3.12).
+
+**Отдельного venv нет** (`POETRY_VIRTUALENVS_CREATE=false`): `poetry install` ставит зависимости
+прямо в активный pyenv-Python, а `python`/`pytest`/`ruff` доступны через шимы pyenv.
 
 Где что физически лежит:
 
 ```
-/workspace                     ← проект с Mac (pyproject.toml, uv.lock — на хосте)
-/root/venv                     ← сам venv (эфемерный, пересоздаётся при каждом запуске)
-/root/.local/share/uv/python   ← скачанные Python  (volume claude-python)
-/root/.cache/uv                ← кэш пакетов/колёс  (volume claude-uv-cache)
+/workspace                                   ← проект с Mac (pyproject.toml, poetry.lock — на хосте)
+/root/.pyenv/versions/<ver>                  ← скомпилированный Python (volume claude-pyenv-versions)
+/root/.pyenv/versions/<ver>/lib/.../site-packages ← сюда Poetry ставит зависимости (тот же volume)
 ```
 
-venv активируется при старте, поэтому команды вызываются напрямую:
+Команды вызываются напрямую:
 
 ```bash
 python --version
 pytest
-uv add requests     # ставит в venv и правит pyproject.toml / uv.lock (на Mac)
-uv sync             # синхронизировать по локу
+poetry add requests        # ставит в текущий Python и правит pyproject.toml / poetry.lock (на Mac)
+poetry install --no-root   # установить по локу (только зависимости)
 ```
 
-venv пересоздаётся на каждый `claude-docker`, но это быстро — Python и колёса берутся из
-persistent-volume'ов, а не качаются заново.
+> `start.sh` зовёт `poetry install` с `--no-root`: в контейнере нужны только зависимости, а не
+> установка самого проекта как пакета (иначе app-репозитории без пакета-одноимёнки падают с
+> `No file/folder found for package …`). Запускаешь код прямо из `/workspace`.
+
+Первый запуск с новой версией Python компилирует её через pyenv (несколько минут); дальше и Python,
+и установленные в него зависимости берутся из volume, поэтому старт быстрый.
+
+> Один volume на все проекты: пакеты живут в site-packages конкретной версии Python. Два проекта на
+> одной версии делят site-packages — для одноразового контейнера, где работаешь по одному проекту,
+> это осознанный размен на простоту (нет venv, нет лишних кэшей).
 
 ---
 
@@ -293,15 +353,17 @@ persistent-volume'ов, а не качаются заново.
 
 Всё задаётся при запуске (в `start.sh`), Claude Code их только наследует:
 
-| Переменная | Значение | Зачем |
-| --- | --- | --- |
-| `CLAUDE_CONFIG_DIR` | `/root/.claude` | Состояние/логин Claude + `CLAUDE.md` в примонтированном каталоге |
-| `UV_PROJECT_ENVIRONMENT` | `/root/venv` | Куда `uv` кладёт venv (вне bind-mount) |
-| `VIRTUAL_ENV` | `/root/venv` | Сигнал «venv активен» |
-| `PATH` | `/root/venv/bin:$PATH` | Чтобы `python`/`pytest`/инструменты брались из venv |
+| Переменная | Значение | Зачем | Где задаётся |
+| --- | --- | --- | --- |
+| `CLAUDE_CONFIG_DIR` | `/root/.claude` | Состояние/логин Claude + `CLAUDE.md` в примонтированном каталоге | `start.sh` |
+| `PYENV_ROOT` | `/root/.pyenv` | Корень pyenv; версии — в `versions/` (volume) | `Dockerfile` |
+| `PATH` | `…/.pyenv/bin:…/.pyenv/shims:…/.local/bin:$PATH` | Шимы pyenv + бинари Poetry/Claude | `Dockerfile` |
+| `POETRY_VIRTUALENVS_CREATE` | `false` | Ставить зависимости в сам Python, без venv | `Dockerfile` |
+| `POETRY_VIRTUALENVS_IN_PROJECT` | `false` | Не подхватывать/не трогать локальный `/workspace/.venv` с Mac | `Dockerfile` |
 
-Внутри Claude Code менять ничего не нужно — активация происходит до `exec claude`, и его
-bash-подпроцессы наследуют окружение. `CLAUDE.md` дополнительно явно сообщает Claude, где venv.
+Всё задаётся в образе/лаунчере до `exec claude`; его bash-подпроцессы наследуют окружение. Нужную
+версию Python выбирает `start.sh` через `pyenv global`. `CLAUDE.md` дополнительно явно сообщает
+Claude, что venv нет и `python` — это шим pyenv.
 
 ---
 
@@ -311,12 +373,18 @@ bash-подпроцессы наследуют окружение. `CLAUDE.md` �
 # пересобрать образ после правки Dockerfile
 docker build -t claude-code-dev ~/.claude-docker
 
-# полная пересборка (подтянуть свежие uv и Claude Code)
+# полная пересборка (подтянуть свежие pyenv, Poetry и Claude Code)
 docker build --no-cache -t claude-code-dev ~/.claude-docker
 ```
 
 Новые системные инструменты — только в Dockerfile + пересборка (ручной `apt` в одноразовом
-контейнере исчезнет). Проектные зависимости — только через `uv` и `pyproject.toml`.
+контейнере исчезнет). Проектные зависимости — только через `poetry` и `pyproject.toml`.
+
+Сбросить скомпилированные Python и установленные в них зависимости (если что-то поломалось):
+
+```bash
+docker volume rm claude-pyenv-versions
+```
 
 ---
 
@@ -335,33 +403,25 @@ docker build --no-cache -t claude-code-dev ~/.claude-docker
 
   "mounts": [
     "source=${localEnv:HOME}/.claude-docker/state,target=/root/.claude,type=bind",
-    "source=claude-uv-cache,target=/root/.cache/uv,type=volume",
-    "source=claude-python,target=/root/.local/share/uv,type=volume"
+    "source=claude-pyenv-versions,target=/root/.pyenv/versions,type=volume"
   ],
 
   "containerEnv": {
-    "CLAUDE_CONFIG_DIR": "/root/.claude",
-    "UV_PROJECT_ENVIRONMENT": "/root/venv",
-    "VIRTUAL_ENV": "/root/venv",
-    "PATH": "/root/venv/bin:${containerEnv:PATH}"
-  },
-
-  "customizations": {
-    "vscode": {
-      "settings": { "python.defaultInterpreterPath": "/root/venv/bin/python" }
-    }
+    "CLAUDE_CONFIG_DIR": "/root/.claude"
   },
 
   "remoteUser": "root",
-  "postCreateCommand": "if [ -f pyproject.toml ]; then uv sync; fi"
+  "postCreateCommand": "if [ -f pyproject.toml ]; then V=\"\"; for f in .python-version .python_version; do [ -f \"$f\" ] && V=\"$(tr -cd '0-9.' < \"$f\")\" && [ -n \"$V\" ] && break; done; if [ -n \"$V\" ]; then pyenv install -s \"$V\"; pyenv global \"$V\"; else pyenv global system; fi; poetry install --no-root; pyenv rehash; fi"
 }
 ```
 
 Подключение: расширение **Dev Containers** → **Reopen in Container**, дальше `claude` в терминале
 (первый раз — `/login`). Отличия от лаунчера: контейнер персистентный (без `--rm`), «с нуля» —
-через **Rebuild Container**; логин переживает rebuild. Здесь `start.sh` не выполняется, поэтому
-активация venv прописана в `containerEnv`. Не запускай `claude-docker` и devcontainer на одном
-проекте одновременно — будет гонка за `.claude.json`.
+через **Rebuild Container**; логин переживает rebuild. Здесь `start.sh` не выполняется, поэтому выбор
+версии Python и `poetry install` вынесены в `postCreateCommand` (venv нет — ставится прямо в
+pyenv-Python). Для VS Code интерпретатор — `/root/.pyenv/shims/python` в **Python: Select
+Interpreter**. Не запускай `claude-docker` и devcontainer на одном проекте одновременно — будет
+гонка за `.claude.json`.
 
 ---
 
@@ -381,9 +441,12 @@ docker build --no-cache -t claude-code-dev ~/.claude-docker
 | `which claude-docker` пусто | Новый терминал или `source ~/.zshrc` |
 | Долгая первая сборка без прогресса | Идёт скачивание бинаря Claude (~180 МБ), подожди |
 | Просит логин каждый раз | Проверь `-e CLAUDE_CONFIG_DIR=/root/.claude` и монтирование `state` в `/root/.claude` |
-| Claude не видит venv / зовёт системный python | Проверь `echo $VIRTUAL_ENV; which python` → оба на `/root/venv`; должны быть строки `export` после `uv sync` |
+| Зовётся не тот python | `which python` → `/root/.pyenv/shims/python`, `python --version` → версия проекта; версию ставит `pyenv global` в `start.sh` |
+| pyenv не подхватывает версию | Нужен файл `.python-version` или `.python_version` с полной версией (`3.11.6`); без него берётся системный Python |
+| `pytest`/`ruff` не находятся после `poetry add` | Выполни `pyenv rehash` (создаёт шимы для новых консольных скриптов) |
+| Долгий первый старт Python-проекта | pyenv компилирует CPython из исходников — разово, потом из volume `claude-pyenv-versions` |
 | Ссылка логина не отдаёт код автоматически | Callback идёт на localhost внутри контейнера — используй ручной ввод кода из браузера |
-| Apple Silicon | Ничего дополнительно указывать не нужно — образ, uv и Claude Code тянутся под arm64 сами |
+| Apple Silicon | Ничего дополнительно указывать не нужно — образ, Python и Claude Code тянутся под arm64 сами |
 
 ---
 
