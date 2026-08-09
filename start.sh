@@ -47,7 +47,10 @@ docker run --rm -it \
             echo "🐍 Python project detected"
             echo "📦 uv sync..."
             uv sync
-            echo; echo "🐍 Python:"; uv run python --version; echo
+            # активируем venv: теперь python/pytest/claude видят его по умолчанию
+            export VIRTUAL_ENV=/root/venv
+            export PATH="/root/venv/bin:$PATH"
+            echo; echo "🐍 Python:"; python --version; echo
         else
             echo "ℹ️  No pyproject.toml found"; echo
         fi
