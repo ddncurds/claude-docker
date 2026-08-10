@@ -9,10 +9,9 @@ environment for running Claude Code on macOS. It is not an application that runs
 container; it is what builds and launches that container. There is no build/lint/test suite —
 "building" means building the Docker image.
 
-The authoritative, exhaustive documentation is `README.MD` (written in Russian). When changing
-behavior, keep `README.MD`, `Dockerfile`, `start.sh`, and `state/CLAUDE.md` mutually consistent —
-the README embeds full copies of `Dockerfile` and `start.sh` as install heredocs, so a change to
-either script must be mirrored in the README's code block (and vice versa).
+The authoritative, exhaustive documentation is `README.MD` (written in Russian). The README embeds
+full copies of `Dockerfile` and the scripts as install heredocs, so the scripts and the README must
+be kept mutually consistent — this is enforced by the sync rule in `rules/` (see below).
 
 ## Commands
 
@@ -29,6 +28,43 @@ docker build --no-cache -t claude-code-dev ~/.claude-docker
 # Validate the launcher after editing
 bash -n start.sh
 ```
+
+## Project memory
+
+Long-lived project facts live in `memory/` — one durable fact per file, worth remembering across
+sessions and shared with the team. `memory/MEMORY.md` is the index; it's imported below so it stays
+in context, and you open a fact file only when its topic comes up.
+
+Each fact file uses this format:
+
+```markdown
+---
+name: <short-kebab-case-slug>          # must match the filename
+description: <one-line summary — used to judge relevance during recall>
+metadata:
+  type: project | reference
+---
+
+<The fact. For `project`, follow with **Why:** and **How to apply:** lines.>
+<Link related memories with [[their-name]].>
+```
+
+- `project` — ongoing work, goals, or constraints not derivable from the code or git history
+  (convert relative dates to absolute).
+- `reference` — pointers to external resources (tickets, dashboards, docs URLs).
+
+Don't record what the repo or this `CLAUDE.md` already states (structure, past fixes, git history).
+Keep personal `user`/`feedback` memories out of the repo — those stay in your own
+`~/.claude/projects/.../memory/`. After adding a file, add a one-line pointer to `memory/MEMORY.md`.
+
+@memory/MEMORY.md
+
+## Rules
+
+Every `*.md` file in `.claude/rules/` is auto-loaded into context — a focused instruction or
+checklist there applies to all sessions. Current rules cover README/script sync, the untouchable
+`state/` dir, dependency layering (Dockerfile + Poetry), shell syntax checks, and never running the
+launcher and devcontainer against one project at once.
 
 ## Architecture
 
@@ -55,22 +91,21 @@ Responsibilities are deliberately split across layers (see README "Как это
   without `.claude.json`, Claude Code treats each start as a fresh install and re-prompts login.
   This is why the container uses its own state dir rather than the Mac's `~/.claude` (macOS stores
   the token in Keychain, unreachable from Linux).
-- **The Python version is pinned by the project**, not the image: `start.sh` reads
+- **The Python version is pinned by the project**, not the image: `setup-python-env.sh` reads
   `.python-version` (or `.python_version`), runs `pyenv install -s <ver>`, and points Poetry at
   that interpreter via `poetry env use`. With no pin, it falls back to the system `python3` (3.12).
-  If the pinned version fails to compile, `start.sh` stops rather than silently running the wrong
-  Python.
+  If the pinned version fails to compile, it stops rather than silently running the wrong Python.
 - **venv lives in Poetry's cache (outside the bind-mount)** at
   `/root/.cache/pypoetry/virtualenvs/<...>`, built on the pyenv interpreter by `poetry env use` +
   `poetry install --no-root`. Keeping it out of `/workspace` avoids writing a Linux venv onto the
   Mac and slow bind-mount I/O. `POETRY_VIRTUALENVS_IN_PROJECT=false` (set in the Dockerfile) keeps
   Poetry from touching the Mac's `/workspace/.venv`. `create=false` is deliberately NOT used: it
   would target the system `python3.12`, locked by PEP 668 (`externally-managed-environment`).
-- **venv is activated before `exec claude`** — after `poetry install`, `start.sh` reads the venv
-  path from `poetry env info --path`, exports `VIRTUAL_ENV`, and prepends `<venv>/bin` to `PATH`,
-  so `python`/`pytest`/`ruff` resolve directly (not just via `poetry run`). `state/CLAUDE.md` (the
-  in-container global memory) promises this to the agent, so the export lines in `start.sh` and
-  that promise must stay in sync.
+- **venv is activated before `exec claude`** — after `poetry install`, `entrypoint.sh` reads the
+  venv path from `poetry env info --path`, exports `VIRTUAL_ENV`, and prepends `<venv>/bin` to
+  `PATH`, so `python`/`pytest`/`ruff` resolve directly (not just via `poetry run`). `state/CLAUDE.md`
+  (the in-container global memory) promises this to the agent, so the export lines and that promise
+  must stay in sync.
 - **`~/.ssh` and `~/.gitconfig` are intentionally NOT mounted** — keys stay on the Mac.
 
 ### Two ways to run, one shared login
@@ -81,7 +116,6 @@ documented in the README) share the same `state/` mount, so login is common. The
 
 ## Conventions
 
-- New system tools go in the `Dockerfile` + rebuild; a manual `apt install` in a running container
-  is lost on exit. Project Python dependencies go through `poetry` / `pyproject.toml`, never `pip`.
-- Heredocs in the README use quoted `'EOF'` so contents are written verbatim — preserve that when
-  editing install snippets.
+The enforceable conventions (dependencies only through their own layer, README/script sync, verbatim
+install snippets, shell syntax checks, no concurrent launcher+devcontainer) are the auto-loaded
+rules in `rules/` — see the Rules section above. Consult them there rather than duplicating here.
