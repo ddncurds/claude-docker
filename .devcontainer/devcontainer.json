@@ -1,0 +1,21 @@
+{
+  "name": "claude-code-dev",
+  "image": "claude-code-dev",
+
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
+
+  "mounts": [
+    "source=${localEnv:HOME}/.claude-docker/state,target=/root/.claude,type=bind",
+    "source=claude-pyenv-versions,target=/root/.pyenv/versions,type=volume",
+    "source=claude-poetry-cache,target=/root/.cache/pypoetry,type=volume",
+    "source=claude-npm-cache,target=/root/.npm,type=volume"
+  ],
+
+  "containerEnv": {
+    "CLAUDE_CONFIG_DIR": "/root/.claude"
+  },
+
+  "remoteUser": "root",
+  "postCreateCommand": "setup-python-env.sh"
+}

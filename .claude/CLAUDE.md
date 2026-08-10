@@ -9,9 +9,11 @@ environment for running Claude Code on macOS. It is not an application that runs
 container; it is what builds and launches that container. There is no build/lint/test suite —
 "building" means building the Docker image.
 
-The authoritative, exhaustive documentation is `README.MD` (written in Russian). The README embeds
-full copies of `Dockerfile` and the scripts as install heredocs, so the scripts and the README must
-be kept mutually consistent — this is enforced by the sync rule in `rules/` (see below).
+The authoritative, exhaustive documentation is `README.MD` (written in Russian). The README
+describes the environment in prose, tables, and operational commands — it does **not** embed copies
+of `Dockerfile` or the scripts (install is `git clone` of this repo). When you change a script,
+update the matching description in the README so the docs stay true — this is enforced by the sync
+rule in `rules/` (see below).
 
 ## Commands
 
