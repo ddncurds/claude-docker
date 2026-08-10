@@ -32,11 +32,12 @@ RUN curl -sSL https://install.python-poetry.org | python3 - \
     && curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/root/.local/bin:$PATH"
 
-# без venv: Poetry ставит зависимости прямо в активный pyenv-Python.
-# IN_PROJECT=false — чтобы Poetry НЕ подхватывал и не трогал локальный
+# Poetry создаёт venv на базе выбранного pyenv-Python (start.sh: `poetry env use`),
+# в кэше /root/.cache/pypoetry (persistent-volume), а НЕ в /workspace.
+# IN_PROJECT=false — чтобы Poetry не подхватывал и не трогал локальный
 # /workspace/.venv (это мак-овский venv с хоста, ему в контейнере делать нечего).
-ENV POETRY_VIRTUALENVS_CREATE=false \
-    POETRY_VIRTUALENVS_IN_PROJECT=false
+# (create=false тут нельзя: тогда Poetry ставит в системный python3.12, залоченный PEP 668.)
+ENV POETRY_VIRTUALENVS_IN_PROJECT=false
 
 WORKDIR /workspace
 CMD ["bash"]
