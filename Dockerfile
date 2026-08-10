@@ -23,6 +23,15 @@ RUN apt-get update && apt-get install -y \
     python3 python3-venv python3-dev python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Node.js: нужен, чтобы поднимать MCP-серверы с type=stdio, которые запускаются
+# через npx (mcp-remote, @sentry/mcp-server и т.п.). Конфиг серверов прокидывается
+# из ~/.claude-docker/mcp.json (см. start.sh). Ставим Node 22 из NodeSource, а НЕ
+# apt-пакет ubuntu: там Node 18, а mcp-remote (undici) требует глобальный `File`
+# (Node 20+), иначе сервер падает с `ReferenceError: File is not defined`.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 # pyenv — управление версиями Python. Компиляция кэшируется в volume /root/.pyenv/versions.
 ENV PYENV_ROOT=/root/.pyenv
 RUN curl -fsSL https://pyenv.run | bash

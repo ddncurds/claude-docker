@@ -22,6 +22,13 @@ fi
 # Уникальное имя -> можно держать несколько проектов параллельно
 SAFE_NAME="$(basename "$PROJECT_DIR" | tr -c 'a-zA-Z0-9_.-' '_')"
 
+# MCP-серверы (опционально): если рядом лежит mcp.json, монтируем его read-only
+# в /root/mcp.json — entrypoint скормит его claude через --mcp-config. Файл с
+# токенами, поэтому НЕ в git (см. .gitignore) и вне примонтированного state.
+MCP_CONFIG="$HOME/.claude-docker/mcp.json"
+MCP_MOUNT=()
+[ -f "$MCP_CONFIG" ] && MCP_MOUNT=(-v "$MCP_CONFIG:/root/mcp.json:ro")
+
 # Логика сессии (подготовка venv + активация + exec claude) запечена в образ
 # как entrypoint.sh (Dockerfile CMD) — единая копия, общая с devcontainer'ом.
 docker run --rm -it \
@@ -31,5 +38,7 @@ docker run --rm -it \
     -e CLAUDE_CONFIG_DIR=/root/.claude \
     -v claude-pyenv-versions:/root/.pyenv/versions \
     -v claude-poetry-cache:/root/.cache/pypoetry \
+    -v claude-npm-cache:/root/.npm \
+    ${MCP_MOUNT[@]+"${MCP_MOUNT[@]}"} \
     -w /workspace \
     "$IMAGE"

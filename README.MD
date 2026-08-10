@@ -40,8 +40,9 @@
 | `start.sh` + `entrypoint.sh` + `setup-python-env.sh` | Как запускается сессия: `start.sh` поднимает контейнер, запечённый в образ `entrypoint.sh` готовит venv и стартует Claude (общий с devcontainer `setup-python-env.sh`) | `~/.claude-docker/*.sh` → образ `/usr/local/bin` |
 | `.python-version` + `pyproject.toml` | Что нужно проекту (версия Python + зависимости) | в проекте, на Mac |
 | Состояние Claude | Авторизация, история, настройки, permissions, skills, hooks | `~/.claude-docker/state` |
-| Docker volumes | Скомпилированные pyenv-Python и venv/кэш Poetry с зависимостями | `claude-pyenv-versions`, `claude-poetry-cache` |
+| Docker volumes | Скомпилированные pyenv-Python, venv/кэш Poetry и кэш npm (для MCP через npx) | `claude-pyenv-versions`, `claude-poetry-cache`, `claude-npm-cache` |
 | `/workspace` | Текущий проект с Mac (bind-mount) | папка проекта |
+| `mcp.json` *(опц.)* | Конфиг MCP-серверов с токенами; монтируется в `/root/mcp.json`, не в git | `~/.claude-docker/mcp.json` |
 
 Осознанно **не** монтируются `~/.ssh` и `~/.gitconfig` — ключи остаются на Mac.
 
@@ -108,6 +109,15 @@ RUN apt-get update && apt-get install -y \
     python3 python3-venv python3-dev python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Node.js: нужен, чтобы поднимать MCP-серверы с type=stdio, которые запускаются
+# через npx (mcp-remote, @sentry/mcp-server и т.п.). Конфиг серверов прокидывается
+# из ~/.claude-docker/mcp.json (см. start.sh). Ставим Node 22 из NodeSource, а НЕ
+# apt-пакет ubuntu: там Node 18, а mcp-remote (undici) требует глобальный `File`
+# (Node 20+), иначе сервер падает с `ReferenceError: File is not defined`.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 # pyenv — управление версиями Python. Компиляция кэшируется в volume /root/.pyenv/versions.
 ENV PYENV_ROOT=/root/.pyenv
 RUN curl -fsSL https://pyenv.run | bash
@@ -138,6 +148,7 @@ EOF
 
 cat > ~/.claude-docker/.dockerignore << 'EOF'
 state/
+mcp.json
 EOF
 
 cat > ~/.claude-docker/start.sh << 'EOF'
@@ -165,6 +176,13 @@ fi
 # Уникальное имя -> можно держать несколько проектов параллельно
 SAFE_NAME="$(basename "$PROJECT_DIR" | tr -c 'a-zA-Z0-9_.-' '_')"
 
+# MCP-серверы (опционально): если рядом лежит mcp.json, монтируем его read-only
+# в /root/mcp.json — entrypoint скормит его claude через --mcp-config. Файл с
+# токенами, поэтому НЕ в git (см. .gitignore) и вне примонтированного state.
+MCP_CONFIG="$HOME/.claude-docker/mcp.json"
+MCP_MOUNT=()
+[ -f "$MCP_CONFIG" ] && MCP_MOUNT=(-v "$MCP_CONFIG:/root/mcp.json:ro")
+
 # Логика сессии (подготовка venv + активация + exec claude) запечена в образ
 # как entrypoint.sh (Dockerfile CMD) — единая копия, общая с devcontainer'ом.
 docker run --rm -it \
@@ -174,6 +192,8 @@ docker run --rm -it \
     -e CLAUDE_CONFIG_DIR=/root/.claude \
     -v claude-pyenv-versions:/root/.pyenv/versions \
     -v claude-poetry-cache:/root/.cache/pypoetry \
+    -v claude-npm-cache:/root/.npm \
+    ${MCP_MOUNT[@]+"${MCP_MOUNT[@]}"} \
     -w /workspace \
     "$IMAGE"
 EOF
@@ -268,6 +288,14 @@ if setup-python-env.sh; then
     echo; echo "🐍 Python: $(python --version 2>&1) [$(command -v python)]"; echo
 fi
 
+# MCP-серверы: если start.sh примонтировал /root/mcp.json — подключаем его.
+# Без --strict-mcp-config, чтобы серверы из файла дополняли (а не заменяли)
+# всё, что уже настроено в state/.claude.json.
+if [ -f /root/mcp.json ]; then
+    echo "🔌 MCP: подключаю серверы из /root/mcp.json"; echo
+    exec claude --mcp-config /root/mcp.json
+fi
+
 exec claude
 EOF
 
@@ -323,7 +351,30 @@ cat > ~/.claude-docker/state/CLAUDE.md << 'EOF'
 EOF
 ```
 
-### 3. Глобальная команда
+### 3. MCP-серверы (опционально)
+
+Если на Mac'е в `~/.claude.json` (ключ верхнего уровня `mcpServers`) уже настроены MCP-серверы,
+контейнер их **не видит**: у него отдельный каталог состояния (`state/`), и там своего `mcpServers`
+нет. Чтобы прокинуть их, положи конфиг рядом с окружением — `start.sh` сам подхватит файл и
+подключит серверы через `claude --mcp-config` (см. `entrypoint.sh`).
+
+```bash
+# перенести serверы из Mac'овского ~/.claude.json в отдельный mcp.json
+jq '{mcpServers}' ~/.claude.json > ~/.claude-docker/mcp.json
+```
+
+Формат файла — `{ "mcpServers": { "<имя>": { … } } }`. В нём лежат токены, поэтому он в
+`.gitignore` / `.dockerignore` и монтируется read-only, вне примонтированного `state/`.
+
+- Серверы с `type: stdio`, которые запускаются через `npx` (`mcp-remote`, `@sentry/mcp-server`,
+  …), работают благодаря `nodejs`/`npm` в образе; скачанные пакеты кэшируются в volume
+  `claude-npm-cache`, поэтому повторные старты быстрые.
+- Нет файла — `start.sh` просто стартует без MCP (маунт добавляется, только если `mcp.json` есть).
+- **devcontainer** свой `entrypoint.sh` не запускает (у него `postCreateCommand=setup-python-env.sh`),
+  поэтому `--mcp-config` там не прокидывается — для него внеси `mcpServers` прямо в
+  `state/.claude.json` либо запусти `claude mcp add …` внутри контейнера.
+
+### 4. Глобальная команда
 
 ```bash
 mkdir -p ~/bin
@@ -447,7 +498,7 @@ docker build --no-cache -t claude-code-dev ~/.claude-docker
 Сбросить скомпилированные Python и/или venv с зависимостями (если что-то поломалось):
 
 ```bash
-docker volume rm claude-pyenv-versions claude-poetry-cache
+docker volume rm claude-pyenv-versions claude-poetry-cache claude-npm-cache
 ```
 
 ---
@@ -468,7 +519,8 @@ docker volume rm claude-pyenv-versions claude-poetry-cache
   "mounts": [
     "source=${localEnv:HOME}/.claude-docker/state,target=/root/.claude,type=bind",
     "source=claude-pyenv-versions,target=/root/.pyenv/versions,type=volume",
-    "source=claude-poetry-cache,target=/root/.cache/pypoetry,type=volume"
+    "source=claude-poetry-cache,target=/root/.cache/pypoetry,type=volume",
+    "source=claude-npm-cache,target=/root/.npm,type=volume"
   ],
 
   "containerEnv": {

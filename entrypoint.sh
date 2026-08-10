@@ -25,4 +25,12 @@ if setup-python-env.sh; then
     echo; echo "🐍 Python: $(python --version 2>&1) [$(command -v python)]"; echo
 fi
 
+# MCP-серверы: если start.sh примонтировал /root/mcp.json — подключаем его.
+# Без --strict-mcp-config, чтобы серверы из файла дополняли (а не заменяли)
+# всё, что уже настроено в state/.claude.json.
+if [ -f /root/mcp.json ]; then
+    echo "🔌 MCP: подключаю серверы из /root/mcp.json"; echo
+    exec claude --mcp-config /root/mcp.json
+fi
+
 exec claude
