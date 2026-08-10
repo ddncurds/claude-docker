@@ -20,7 +20,7 @@ either script must be mirrored in the README's code block (and vice versa).
 # Build the image (image name is claude-code-dev)
 docker build -t claude-code-dev ~/.claude-docker
 
-# Full rebuild — pull fresh uv and Claude Code
+# Full rebuild — pull fresh pyenv, Poetry and Claude Code
 docker build --no-cache -t claude-code-dev ~/.claude-docker
 
 # Launch: builds image if missing, mounts $(pwd) into /workspace, runs Claude Code
@@ -35,17 +35,18 @@ bash -n start.sh
 Responsibilities are deliberately split across layers (see README "Как это устроено"):
 
 - **`Dockerfile`** — *what the environment can do*: Ubuntu 24.04 + system tools (PDF/OCR via
-  poppler/tesseract with eng+rus, packet analysis via tshark/tcpdump, git/jq/ripgrep), `uv`, and
-  the Claude Code native installer. The Claude binary lands in `/root/.local/bin` (not
-  `/root/.claude`, which is the mounted state dir).
+  poppler/tesseract with eng+rus, packet analysis via tshark/tcpdump, git/jq/ripgrep), the CPython
+  build deps, `pyenv`, `poetry`, and the Claude Code native installer. Both the Poetry and Claude
+  binaries land in `/root/.local/bin` (not `/root/.claude`, which is the mounted state dir).
 - **`start.sh`** — *how a session is launched*: bind-mounts the current project into `/workspace`,
   mounts persistent state and caches, sets env vars, then `exec claude`. Uses `--rm` so the
   container is discarded on exit; state/caches survive via mounts.
 - **`state/`** — persistent Claude state (login, history, settings). **Gitignored** (`.gitignore`
   = `state/`) and contains real credentials (`.credentials.json`, `.claude.json`) — never commit
   it, and treat its contents as untouchable.
-- **Docker named volumes** — `claude-uv-cache` (uv package cache) and `claude-python`
-  (downloaded Python interpreters), so venv recreation on each run is fast.
+- **Docker named volumes** — `claude-pyenv-versions` (CPython versions compiled by pyenv) and
+  `claude-poetry-cache` (Poetry's cache, including the project venvs under
+  `/root/.cache/pypoetry/virtualenvs`), so Python compilation and venv recreation are paid once.
 
 ### Load-bearing design decisions (don't undo without understanding)
 
@@ -54,13 +55,22 @@ Responsibilities are deliberately split across layers (see README "Как это
   without `.claude.json`, Claude Code treats each start as a fresh install and re-prompts login.
   This is why the container uses its own state dir rather than the Mac's `~/.claude` (macOS stores
   the token in Keychain, unreachable from Linux).
-- **venv lives at `/root/venv` (outside the bind-mount)** via `UV_PROJECT_ENVIRONMENT=/root/venv`.
-  Keeping it out of `/workspace` avoids writing a Linux venv onto the Mac and slow bind-mount I/O.
-  It is ephemeral (recreated each run by `uv sync`).
-- **venv is activated before `exec claude`** — `start.sh` exports `VIRTUAL_ENV=/root/venv` and
-  prepends `/root/venv/bin` to `PATH` after `uv sync`, so `python`/`pytest`/`ruff` resolve
-  directly (not just via `uv run`). `state/CLAUDE.md` (the in-container global memory) promises
-  this to the agent, so the export lines in `start.sh` and that promise must stay in sync.
+- **The Python version is pinned by the project**, not the image: `start.sh` reads
+  `.python-version` (or `.python_version`), runs `pyenv install -s <ver>`, and points Poetry at
+  that interpreter via `poetry env use`. With no pin, it falls back to the system `python3` (3.12).
+  If the pinned version fails to compile, `start.sh` stops rather than silently running the wrong
+  Python.
+- **venv lives in Poetry's cache (outside the bind-mount)** at
+  `/root/.cache/pypoetry/virtualenvs/<...>`, built on the pyenv interpreter by `poetry env use` +
+  `poetry install --no-root`. Keeping it out of `/workspace` avoids writing a Linux venv onto the
+  Mac and slow bind-mount I/O. `POETRY_VIRTUALENVS_IN_PROJECT=false` (set in the Dockerfile) keeps
+  Poetry from touching the Mac's `/workspace/.venv`. `create=false` is deliberately NOT used: it
+  would target the system `python3.12`, locked by PEP 668 (`externally-managed-environment`).
+- **venv is activated before `exec claude`** — after `poetry install`, `start.sh` reads the venv
+  path from `poetry env info --path`, exports `VIRTUAL_ENV`, and prepends `<venv>/bin` to `PATH`,
+  so `python`/`pytest`/`ruff` resolve directly (not just via `poetry run`). `state/CLAUDE.md` (the
+  in-container global memory) promises this to the agent, so the export lines in `start.sh` and
+  that promise must stay in sync.
 - **`~/.ssh` and `~/.gitconfig` are intentionally NOT mounted** — keys stay on the Mac.
 
 ### Two ways to run, one shared login
@@ -72,6 +82,6 @@ documented in the README) share the same `state/` mount, so login is common. The
 ## Conventions
 
 - New system tools go in the `Dockerfile` + rebuild; a manual `apt install` in a running container
-  is lost on exit. Project Python dependencies go through `uv` / `pyproject.toml`, never `pip`.
+  is lost on exit. Project Python dependencies go through `poetry` / `pyproject.toml`, never `pip`.
 - Heredocs in the README use quoted `'EOF'` so contents are written verbatim — preserve that when
   editing install snippets.

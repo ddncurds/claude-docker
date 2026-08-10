@@ -37,6 +37,7 @@
 | Слой | За что отвечает | Где живёт |
 | --- | --- | --- |
 | `Dockerfile` | Что умеет окружение (Ubuntu + инструменты + pyenv + poetry + Claude Code) | `~/.claude-docker/Dockerfile` |
+| `start.sh` + `entrypoint.sh` + `setup-python-env.sh` | Как запускается сессия: `start.sh` поднимает контейнер, запечённый в образ `entrypoint.sh` готовит venv и стартует Claude (общий с devcontainer `setup-python-env.sh`) | `~/.claude-docker/*.sh` → образ `/usr/local/bin` |
 | `.python-version` + `pyproject.toml` | Что нужно проекту (версия Python + зависимости) | в проекте, на Mac |
 | Состояние Claude | Авторизация, история, настройки, permissions, skills, hooks | `~/.claude-docker/state` |
 | Docker volumes | Скомпилированные pyenv-Python и venv/кэш Poetry с зависимостями | `claude-pyenv-versions`, `claude-poetry-cache` |
@@ -53,7 +54,7 @@
   в Keychain (недоступен из Linux) и удаляет файловый `.credentials.json`; общий каталог давал бы
   постоянные перелогины.
 - **venv Poetry на базе pyenv-Python, вне bind-mount** — лежит в `/root/.cache/pypoetry/virtualenvs`
-  (volume), `start.sh` активирует его перед стартом, поэтому `python`/`pytest` доступны напрямую. На
+  (volume), `entrypoint.sh` активирует его перед стартом, поэтому `python`/`pytest` доступны напрямую. На
   Mac не попадает нерабочий linux-venv. `create=false` тут не годится: тогда Poetry ставит в
   системный `python3.12`, залоченный PEP 668, мимо нужной версии.
 - **pyenv компилирует CPython из исходников** — первая установка версии занимает минуты, но и сам
@@ -96,8 +97,9 @@ RUN apt-get update && apt-get install -y \
     \
     tshark tcpdump iproute2 \
     \
-    # зависимости для сборки CPython через pyenv (компиляция из исходников)
-    make libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
+    # зависимости для сборки CPython через pyenv (компиляция из исходников;
+    # make/gcc уже есть в build-essential выше)
+    libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
     libsqlite3-dev libncurses-dev libffi-dev liblzma-dev \
     xz-utils tk-dev \
     \
@@ -116,15 +118,22 @@ RUN curl -sSL https://install.python-poetry.org | python3 - \
     && curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/root/.local/bin:$PATH"
 
-# Poetry создаёт venv на базе выбранного pyenv-Python (start.sh: `poetry env use`),
+# Poetry создаёт venv на базе выбранного pyenv-Python (setup-python-env.sh: `poetry env use`),
 # в кэше /root/.cache/pypoetry (persistent-volume), а НЕ в /workspace.
 # IN_PROJECT=false — чтобы Poetry не подхватывал и не трогал локальный
 # /workspace/.venv (это мак-овский venv с хоста, ему в контейнере делать нечего).
 # (create=false тут нельзя: тогда Poetry ставит в системный python3.12, залоченный PEP 668.)
 ENV POETRY_VIRTUALENVS_IN_PROJECT=false
 
+# Скрипты сессии запечены в образ (а не переданы inline в start.sh), поэтому
+# одна копия логики используется и лаунчером, и devcontainer'ом:
+#   setup-python-env.sh — общая подготовка venv (pyenv + poetry)
+#   entrypoint.sh       — обёртка лаунчера: setup + активация venv + exec claude
+COPY entrypoint.sh setup-python-env.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/setup-python-env.sh
+
 WORKDIR /workspace
-CMD ["bash"]
+CMD ["entrypoint.sh"]
 EOF
 
 cat > ~/.claude-docker/.dockerignore << 'EOF'
@@ -156,6 +165,8 @@ fi
 # Уникальное имя -> можно держать несколько проектов параллельно
 SAFE_NAME="$(basename "$PROJECT_DIR" | tr -c 'a-zA-Z0-9_.-' '_')"
 
+# Логика сессии (подготовка venv + активация + exec claude) запечена в образ
+# как entrypoint.sh (Dockerfile CMD) — единая копия, общая с devcontainer'ом.
 docker run --rm -it \
     --name "claude-${SAFE_NAME}-$$" \
     -v "$PROJECT_DIR:/workspace" \
@@ -164,76 +175,103 @@ docker run --rm -it \
     -v claude-pyenv-versions:/root/.pyenv/versions \
     -v claude-poetry-cache:/root/.cache/pypoetry \
     -w /workspace \
-    "$IMAGE" \
-    bash -lc '
-        echo
-        echo "🐧 Ubuntu:"; grep PRETTY_NAME /etc/os-release; echo
-
-        if [ ! -f /root/.claude/.credentials.json ]; then
-            echo "🔑 В этом окружении Claude ещё не залогинен."
-            echo "   Запусти /login, открой ссылку в браузере Mac, подтверди вход"
-            echo "   и вставь код обратно. Дальше логин сохранится."
-            echo
-        fi
-
-        if [ -f pyproject.toml ]; then
-            echo "🐍 Python project detected"
-
-            # версия из .python-version (или .python_version); tr -cd оставляет только
-            # цифры и точки — переживает BOM/CRLF/UTF-16. Пусто -> системный Python.
-            PYVER=""
-            for f in .python-version .python_version; do
-                [ -f "$f" ] || continue
-                PYVER="$(tr -cd "0-9." < "$f")"
-                [ -n "$PYVER" ] && break
-            done
-
-            SKIP_POETRY=0
-            PYBIN="python3"   # fallback, если версия не запинена
-            if [ -n "$PYVER" ]; then
-                echo "🐍 pyenv: ставлю Python $PYVER (первый раз компилируется, потом из кэша)..."
-                pyenv install -s "$PYVER" 2>&1 || echo "⚠️  pyenv install $PYVER вернул ошибку (см. вывод выше)"
-                if [ -x "$PYENV_ROOT/versions/$PYVER/bin/python" ]; then
-                    PYBIN="$PYENV_ROOT/versions/$PYVER/bin/python"
-                else
-                    # НЕ откатываемся молча на системный python3 (он externally-managed,
-                    # PEP 668) — честно стоп, чтобы не запускаться не на той версии.
-                    echo
-                    echo "❌ Python $PYVER не установился (сборка pyenv упала — см. вывод выше)."
-                    echo "   Диагностика (на Mac): docker run --rm -it \\"
-                    echo "     -v claude-pyenv-versions:/root/.pyenv/versions $IMAGE bash -lc \"pyenv install $PYVER\""
-                    echo "   Если сборка падала раньше — сперва: docker volume rm claude-pyenv-versions"
-                    echo
-                    SKIP_POETRY=1
-                fi
-            else
-                echo "🐍 .python-version не найден — беру системный python3"
-            fi
-
-            if [ "$SKIP_POETRY" = 0 ]; then
-                # venv на базе выбранного интерпретатора, ВНЕ /workspace (в кэше Poetry,
-                # persistent-volume). Это единственный надёжный способ поставить пакеты
-                # именно в этот Python: poetry с create=false целится в системный 3.12.
-                echo "📦 poetry: окружение на $("$PYBIN" --version 2>&1)"
-                poetry env use "$PYBIN" >/dev/null
-                echo "📦 poetry install --no-root..."
-                poetry install --no-root
-
-                # активируем venv: python/pytest/ruff видят его напрямую
-                VENV="$(poetry env info --path)"
-                export VIRTUAL_ENV="$VENV"
-                export PATH="$VENV/bin:$PATH"
-                echo; echo "🐍 Python: $(python --version 2>&1) [$(command -v python)]"; echo
-            fi
-        else
-            echo "ℹ️  No pyproject.toml found"; echo
-        fi
-
-        exec claude
-    '
+    "$IMAGE"
 EOF
 
-chmod +x ~/.claude-docker/start.sh
+cat > ~/.claude-docker/setup-python-env.sh << 'EOF'
+#!/usr/bin/env bash
+# Готовит venv Poetry для проекта в текущем каталоге. Единая копия логики,
+# которую зовут и лаунчер (entrypoint.sh), и devcontainer (postCreateCommand).
+#
+# Делает: читает .python-version / .python_version → pyenv install -s <ver>
+# (или системный python3, если версия не запинена) → poetry env use → poetry
+# install --no-root.
+#
+# Код возврата — контракт для вызывающего «активировать ли venv»:
+#   0  — venv готов, можно активировать
+#   1  — нет pyproject.toml (активировать нечего)
+#   3  — запиненная версия Python не собралась (venv не готов)
+set -uo pipefail
+
+[ -f pyproject.toml ] || { echo "ℹ️  No pyproject.toml found"; echo; exit 1; }
+
+echo "🐍 Python project detected"
+
+# версия из .python-version (или .python_version); tr -cd оставляет только
+# цифры и точки — переживает BOM/CRLF/UTF-16. Пусто -> системный python3.
+PYVER=""
+for f in .python-version .python_version; do
+    [ -f "$f" ] || continue
+    PYVER="$(tr -cd "0-9." < "$f")"
+    [ -n "$PYVER" ] && break
+done
+
+PYBIN="python3"   # fallback, если версия не запинена
+if [ -n "$PYVER" ]; then
+    echo "🐍 pyenv: ставлю Python $PYVER (первый раз компилируется, потом из кэша)..."
+    pyenv install -s "$PYVER" 2>&1 || echo "⚠️  pyenv install $PYVER вернул ошибку (см. вывод выше)"
+    if [ -x "$PYENV_ROOT/versions/$PYVER/bin/python" ]; then
+        PYBIN="$PYENV_ROOT/versions/$PYVER/bin/python"
+    else
+        # НЕ откатываемся молча на системный python3 (он externally-managed,
+        # PEP 668) — честно стоп, чтобы не запускаться не на той версии.
+        echo
+        echo "❌ Python $PYVER не установился (сборка pyenv упала — см. вывод выше)."
+        echo "   Диагностика (на Mac): docker run --rm -it \\"
+        echo "     -v claude-pyenv-versions:/root/.pyenv/versions claude-code-dev bash -lc \"pyenv install $PYVER\""
+        echo "   Если сборка падала раньше — сперва: docker volume rm claude-pyenv-versions"
+        echo
+        exit 3
+    fi
+else
+    echo "🐍 .python-version не найден — беру системный python3"
+fi
+
+# venv на базе выбранного интерпретатора, ВНЕ /workspace (в кэше Poetry,
+# persistent-volume). Это единственный надёжный способ поставить пакеты
+# именно в этот Python: poetry с create=false целится в системный 3.12.
+echo "📦 poetry: окружение на $("$PYBIN" --version 2>&1)"
+poetry env use "$PYBIN" >/dev/null
+echo "📦 poetry install --no-root..."
+poetry install --no-root
+
+# venv готов (даже если install споткнулся — окружение уже создано); пусть
+# вызывающий его активирует.
+exit 0
+EOF
+
+cat > ~/.claude-docker/entrypoint.sh << 'EOF'
+#!/usr/bin/env bash
+# Команда контейнера (Dockerfile CMD) для одноразового лаунчера start.sh:
+# баннер → проверка логина → подготовка venv (setup-python-env.sh) →
+# активация venv → exec claude. Devcontainer это НЕ выполняет — он зовёт
+# setup-python-env.sh напрямую из postCreateCommand.
+set -uo pipefail
+
+echo
+echo "🐧 Ubuntu:"; grep PRETTY_NAME /etc/os-release; echo
+
+if [ ! -f /root/.claude/.credentials.json ]; then
+    echo "🔑 В этом окружении Claude ещё не залогинен."
+    echo "   Запусти /login, открой ссылку в браузере Mac, подтверди вход"
+    echo "   и вставь код обратно. Дальше логин сохранится."
+    echo
+fi
+
+# setup-python-env.sh возвращает 0, только если venv готов к активации
+# (есть pyproject.toml и Python встал). Иначе просто стартуем Claude.
+if setup-python-env.sh; then
+    # активируем venv: python/pytest/ruff видят его напрямую
+    VENV="$(poetry env info --path)"
+    export VIRTUAL_ENV="$VENV"
+    export PATH="$VENV/bin:$PATH"
+    echo; echo "🐍 Python: $(python --version 2>&1) [$(command -v python)]"; echo
+fi
+
+exec claude
+EOF
+
+chmod +x ~/.claude-docker/start.sh ~/.claude-docker/setup-python-env.sh ~/.claude-docker/entrypoint.sh
 ```
 
 ### 2. Память Claude (CLAUDE.md)
@@ -262,15 +300,15 @@ cat > ~/.claude-docker/state/CLAUDE.md << 'EOF'
 
 ## Версия Python
 - Версию задаёт проект: файл `.python-version` (или `.python_version`) с полной версией, напр. `3.11.6`.
-- При старте `start.sh` читает его, делает `pyenv install -s <ver>` (компиляция кэшируется в volume
-  `claude-pyenv-versions`) и `poetry env use` на этот интерпретатор.
+- При старте `setup-python-env.sh` (его зовёт `entrypoint.sh`) читает его, делает `pyenv install -s <ver>`
+  (компиляция кэшируется в volume `claude-pyenv-versions`) и `poetry env use` на этот интерпретатор.
 - Без `.python-version` venv строится на системном `python3` (3.12).
 - Хочешь другую версию — правь `.python-version` (на Mac) и перезапусти контейнер.
 
 ## Зависимости
 - Добавить пакет: `poetry add <pkg>` (правит pyproject.toml + poetry.lock, ставит в venv).
 - Установить по локу: `poetry install --no-root` (в контейнере ставим только зависимости, не сам
-  проект как пакет — так стартует `start.sh`).
+  проект как пакет — так делает `setup-python-env.sh`).
 - venv кэшируется в volume и переживает перезапуск. Установка мимо poetry (`pip install`) не
   сохранится после `--rm` — всегда `poetry add` / `poetry install`.
 
@@ -342,8 +380,9 @@ claude-docker
 Зависимости — как обычно в Poetry, через `[tool.poetry]` в `pyproject.toml`. Без `.python-version`
 venv строится на системном `python3` образа (3.12).
 
-**Как это работает:** `start.sh` ставит нужный Python через pyenv, затем `poetry env use` создаёт
-venv **на базе именно этой версии** в кэше Poetry (вне `/workspace`) и активирует его —
+**Как это работает:** `setup-python-env.sh` (в образе, зовётся из `entrypoint.sh`) ставит нужный Python
+через pyenv, затем `poetry env use` создаёт venv **на базе именно этой версии** в кэше Poetry (вне
+`/workspace`); `entrypoint.sh` его активирует —
 `python`/`pytest`/`ruff` доступны напрямую. Прямой установки «в сам Python» (`create=false`) тут
 нельзя: на Ubuntu Poetry тогда целится в системный `python3.12`, залоченный PEP 668 — отсюда были
 ошибки `externally-managed-environment`.
@@ -365,7 +404,7 @@ poetry add requests        # ставит в venv и правит pyproject.toml
 poetry install --no-root   # установить по локу (только зависимости)
 ```
 
-> `start.sh` зовёт `poetry install` с `--no-root`: в контейнере нужны только зависимости, а не
+> `setup-python-env.sh` зовёт `poetry install` с `--no-root`: в контейнере нужны только зависимости, а не
 > установка самого проекта как пакета (иначе app-репозитории без пакета-одноимёнки падают с
 > `No file/folder found for package …`). Запускаешь код прямо из `/workspace`.
 
@@ -376,19 +415,19 @@ poetry install --no-root   # установить по локу (только з
 
 ## Переменные окружения
 
-Всё задаётся при запуске (в `start.sh`), Claude Code их только наследует:
+Всё задаётся при запуске (флаг `-e` в `start.sh` или экспорт в `entrypoint.sh`), Claude Code их только наследует:
 
 | Переменная | Значение | Зачем | Где задаётся |
 | --- | --- | --- | --- |
 | `CLAUDE_CONFIG_DIR` | `/root/.claude` | Состояние/логин Claude + `CLAUDE.md` в примонтированном каталоге | `start.sh` |
 | `PYENV_ROOT` | `/root/.pyenv` | Корень pyenv; версии — в `versions/` (volume) | `Dockerfile` |
 | `POETRY_VIRTUALENVS_IN_PROJECT` | `false` | Не подхватывать/не трогать локальный `/workspace/.venv` с Mac | `Dockerfile` |
-| `VIRTUAL_ENV` | путь venv Poetry | Сигнал «venv активен» | `start.sh` (после `poetry install`) |
-| `PATH` | `<venv>/bin:$PATH` | Чтобы `python`/`pytest`/инструменты брались из venv | `start.sh` |
+| `VIRTUAL_ENV` | путь venv Poetry | Сигнал «venv активен» | `entrypoint.sh` (после `poetry install`) |
+| `PATH` | `<venv>/bin:$PATH` | Чтобы `python`/`pytest`/инструменты брались из venv | `entrypoint.sh` |
 
-Всё задаётся в образе/лаунчере до `exec claude`; его bash-подпроцессы наследуют окружение. `start.sh`
-ставит нужный Python через pyenv, создаёт на нём venv (`poetry env use`) и активирует его. `CLAUDE.md`
-дополнительно явно сообщает Claude, где venv.
+Всё задаётся в образе/лаунчере до `exec claude`; его bash-подпроцессы наследуют окружение.
+`setup-python-env.sh` ставит нужный Python через pyenv и создаёт на нём venv (`poetry env use`),
+`entrypoint.sh` его активирует. `CLAUDE.md` дополнительно явно сообщает Claude, где venv.
 
 ---
 
@@ -437,15 +476,15 @@ docker volume rm claude-pyenv-versions claude-poetry-cache
   },
 
   "remoteUser": "root",
-  "postCreateCommand": "if [ -f pyproject.toml ]; then V=\"\"; for f in .python-version .python_version; do [ -f \"$f\" ] && V=\"$(tr -cd '0-9.' < \"$f\")\" && [ -n \"$V\" ] && break; done; P=python3; if [ -n \"$V\" ]; then pyenv install -s \"$V\" && P=\"$PYENV_ROOT/versions/$V/bin/python\"; fi; poetry env use \"$P\"; poetry install --no-root; fi"
+  "postCreateCommand": "setup-python-env.sh"
 }
 ```
 
 Подключение: расширение **Dev Containers** → **Reopen in Container**, дальше `claude` в терминале
 (первый раз — `/login`). Отличия от лаунчера: контейнер персистентный (без `--rm`), «с нуля» —
-через **Rebuild Container**; логин переживает rebuild. Здесь `start.sh` не выполняется, поэтому выбор
-версии Python, `poetry env use` и `poetry install` вынесены в `postCreateCommand`. venv в кэше Poetry
-не активируется автоматически — вызывай инструменты через `poetry run <cmd>` либо активируй вручную:
+через **Rebuild Container**; логин переживает rebuild. Здесь `start.sh`/`entrypoint.sh` не выполняются,
+поэтому подготовку venv делает тот же запечённый `setup-python-env.sh`, вызванный из `postCreateCommand`.
+venv в кэше Poetry не активируется автоматически — вызывай инструменты через `poetry run <cmd>` либо активируй вручную:
 `source "$(poetry env info --path)/bin/activate"`. Тем же путём укажи интерпретатор в VS Code
 (**Python: Select Interpreter**). Не запускай `claude-docker` и devcontainer на одном проекте
 одновременно — будет гонка за `.claude.json`.
@@ -456,7 +495,7 @@ docker volume rm claude-pyenv-versions claude-poetry-cache
 
 - **PDF**: `pdftotext file.pdf -`, `pdfinfo file.pdf`, для сканов `ocrmypdf in.pdf out.pdf`
   (OCR через `tesseract`, eng + rus).
-- **Wireshark-дампы**: `tshark -r capture.pcapng` (например `-Y "http"`); только чтение `.pcap`/`.pcapng`, без GUI.
+- **Wireshark-дампы**: `tshark -r ture.pcapng` (например `-Y "http"`); только чтение `.pcap`/`.pcapng`, без GUI.
 - **Dev**: git, jq, ripgrep, tree, vim, build-essential.
 
 ---
