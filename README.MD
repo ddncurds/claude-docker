@@ -137,18 +137,43 @@ jq '{mcpServers}' ~/.claude.json > ~/.claude-docker/mcp.json
   поэтому `--mcp-config` там не прокидывается — для него внеси `mcpServers` прямо в
   `state/.claude.json` либо запусти `claude mcp add …` внутри контейнера.
 
-### 4. Глобальная команда
+### 4. Глобальная команда (запуск из любой папки проекта)
+
+Чтобы `claude-docker` вызывался из каталога любого проекта (а не только по полному пути
+`~/.claude-docker/start.sh`), нужно положить исполняемую ссылку в каталог из `PATH`. Три шага:
 
 ```bash
+# 1. Каталог для пользовательских команд (если ещё нет)
 mkdir -p ~/bin
-ln -sf ~/.claude-docker/start.sh ~/bin/claude-docker
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
 
+# 2. Симлинк на лаунчер под именем `claude-docker`
+ln -sf ~/.claude-docker/start.sh ~/bin/claude-docker
+
+# 3. Добавить ~/bin в PATH через ~/.zshrc (shell по умолчанию на macOS)
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc      # применить в текущем терминале (в новых подхватится само)
+```
+
+Что происходит:
+
+- **Шаг 2** делает `claude-docker` синонимом `start.sh` — правки скрипта в репозитории видны сразу,
+  ничего пересоздавать не нужно (это симлинк, не копия).
+- **Шаг 3** кладёт `~/bin` в `PATH`, поэтому shell находит команду из **любого** каталога. Сам
+  `start.sh` монтирует в `/workspace` текущую папку (`PROJECT_DIR="$(pwd)"`) — значит из какого
+  проекта запустил, тот и попадёт в контейнер.
+
+Проверка:
+
+```bash
 which claude-docker      # -> /Users/<ты>/bin/claude-docker
 ```
 
-Если пусто — открой новый терминал или ещё раз `source ~/.zshrc`.
+Если пусто — строка `export PATH=...` не применилась: открой новый терминал или ещё раз
+`source ~/.zshrc`. Если строка добавилась в `~/.zshrc` несколько раз — лишние дубли можно удалить,
+достаточно одной.
+
+> Не `zsh`? Добавь ту же строку `export PATH="$HOME/bin:$PATH"` в конфиг своего shell
+> (`~/.bashrc` для bash) и перезапусти его.
 
 ---
 
