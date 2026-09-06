@@ -1,10 +1,12 @@
 # claude-docker
 
-Изолированное окружение для **Claude Code** на macOS: одна команда `claude-docker`
+Изолированное окружение для **Claude Code** на macOS и Linux: одна команда `claude-docker`
 поднимает одноразовый контейнер (Ubuntu 24.04) с `pyenv`, `poetry`, git и набором CLI-инструментов,
 монтирует текущую папку проекта в `/workspace` и запускает Claude Code. После выхода контейнер
 удаляется, но логин, история, настройки Claude, скомпилированные Python и venv Poetry с
 зависимостями сохраняются.
+
+Различия между хостами вынесены в отдельный раздел — [Особенности Linux](#особенности-linux).
 
 ---
 
@@ -24,6 +26,7 @@
   - [Python и виртуальное окружение](#python-и-виртуальное-окружение)
   - [Переменные окружения](#переменные-окружения)
   - [Обслуживание](#обслуживание)
+  - [Особенности Linux](#особенности-linux)
   - [Devcontainer](#devcontainer)
   - [Что уже в образе](#что-уже-в-образе)
   - [Траблшутинг](#траблшутинг)
@@ -37,15 +40,20 @@
 
 | Слой | За что отвечает | Где живёт |
 | --- | --- | --- |
-| `Dockerfile` | Что умеет окружение (Ubuntu + инструменты + pyenv + poetry + Claude Code) | `~/.claude-docker/Dockerfile` |
-| `start.sh` + `entrypoint.sh` + `setup-python-env.sh` | Как запускается сессия: `start.sh` поднимает контейнер, запечённый в образ `entrypoint.sh` готовит venv и стартует Claude (общий с devcontainer `setup-python-env.sh`) | `~/.claude-docker/*.sh` → образ `/usr/local/bin` |
-| `.python-version` + `pyproject.toml` | Что нужно проекту (версия Python + зависимости) | в проекте, на Mac |
-| Состояние Claude | Авторизация, история, настройки, permissions, skills, hooks | `~/.claude-docker/state` |
+| `Dockerfile` | Что умеет окружение (Ubuntu + инструменты + pyenv + poetry + Claude Code) | `<env>/Dockerfile` |
+| `start.sh` + `entrypoint.sh` + `setup-python-env.sh` | Как запускается сессия: `start.sh` поднимает контейнер, запечённый в образ `entrypoint.sh` готовит venv и стартует Claude (общий с devcontainer `setup-python-env.sh`) | `<env>/*.sh` → образ `/usr/local/bin` |
+| `.python-version` + `pyproject.toml` | Что нужно проекту (версия Python + зависимости) | в проекте, на хосте |
+| Состояние Claude | Авторизация, история, настройки, permissions, skills, hooks | `<env>/state` |
 | Docker volumes | Скомпилированные pyenv-Python, venv/кэш Poetry и кэш npm (для MCP через npx) | `claude-pyenv-versions`, `claude-poetry-cache`, `claude-npm-cache` |
-| `/workspace` | Текущий проект с Mac (bind-mount) | папка проекта |
-| `mcp.json` *(опц.)* | Конфиг MCP-серверов с токенами; монтируется в `/root/mcp.json`, не в git | `~/.claude-docker/mcp.json` |
+| `/workspace` | Текущий проект с хоста (bind-mount) | папка проекта |
+| `mcp.json` *(опц.)* | Конфиг MCP-серверов с токенами; монтируется в `/root/mcp.json`, не в git | `<env>/mcp.json` |
 
-Осознанно **не** монтируются `~/.ssh` и `~/.gitconfig` — ключи остаются на Mac.
+`<env>` — каталог, куда склонирован этот репозиторий. Он **не** захардкожен: `start.sh` вычисляет
+его из пути к самому себе (разматывая симлинк `~/bin/claude-docker`), поэтому окружение может лежать
+где угодно — `~/.claude-docker`, `~/projects/claude-docker`, что угодно. Дальше в README он для
+краткости пишется как `~/.claude-docker`.
+
+Осознанно **не** монтируются `~/.ssh` и `~/.gitconfig` — ключи остаются на хосте.
 
 Ключевые решения:
 
@@ -67,10 +75,18 @@
 
 ## Предусловия
 
-Только **Docker Desktop** (установлен и запущен). pyenv, Poetry и Python на Mac не нужны.
+Только Docker (установлен и запущен) — **Docker Desktop** на macOS, **Docker Desktop или Docker
+Engine** на Linux. pyenv, Poetry и Python на хосте не нужны.
 
 ```bash
-docker info >/dev/null 2>&1 && echo "Docker OK" || echo "Запусти Docker Desktop"
+docker info >/dev/null 2>&1 && echo "Docker OK" || echo "Docker недоступен"
+```
+
+На Linux с Docker Engine `docker info` может падать с `permission denied ... docker.sock` — значит
+пользователя нет в группе `docker`:
+
+```bash
+sudo usermod -aG docker "$USER"   # затем перелогиниться (или `newgrp docker`)
 ```
 
 ---
@@ -79,7 +95,9 @@ docker info >/dev/null 2>&1 && echo "Docker OK" || echo "Запусти Docker D
 
 ### 1. Файлы окружения
 
-Все файлы окружения — это и есть содержимое **этого репозитория**. Установка = положить его в `~/.claude-docker`:
+Все файлы окружения — это и есть содержимое **этого репозитория**. Установка = склонировать его;
+путь произвольный, `start.sh` находит своё окружение сам (см. `<env>` выше). Дальше в README
+используется `~/.claude-docker`:
 
 ```bash
 git clone https://github.com/ddncurds/claude-docker.git ~/.claude-docker
@@ -149,15 +167,19 @@ mkdir -p ~/bin
 # 2. Симлинк на лаунчер под именем `claude-docker`
 ln -sf ~/.claude-docker/start.sh ~/bin/claude-docker
 
-# 3. Добавить ~/bin в PATH через ~/.zshrc (shell по умолчанию на macOS)
-echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc      # применить в текущем терминале (в новых подхватится само)
+# 3. Добавить ~/bin в PATH через конфиг своего shell
+#    macOS (zsh по умолчанию):
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+#    Linux (bash по умолчанию):
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc
 ```
 
 Что происходит:
 
 - **Шаг 2** делает `claude-docker` синонимом `start.sh` — правки скрипта в репозитории видны сразу,
-  ничего пересоздавать не нужно (это симлинк, не копия).
+  ничего пересоздавать не нужно (это симлинк, не копия). `start.sh` разматывает симлинк, чтобы
+  найти свой каталог окружения (`Dockerfile`, `state/`, `mcp.json`), поэтому репозиторий может
+  лежать где угодно.
 - **Шаг 3** кладёт `~/bin` в `PATH`, поэтому shell находит команду из **любого** каталога. Сам
   `start.sh` монтирует в `/workspace` текущую папку (`PROJECT_DIR="$(pwd)"`) — значит из какого
   проекта запустил, тот и попадёт в контейнер.
@@ -165,15 +187,12 @@ source ~/.zshrc      # применить в текущем терминале (
 Проверка:
 
 ```bash
-which claude-docker      # -> /Users/<ты>/bin/claude-docker
+which claude-docker      # -> /Users/<ты>/bin/claude-docker (macOS) | /home/<ты>/bin/claude-docker (Linux)
 ```
 
 Если пусто — строка `export PATH=...` не применилась: открой новый терминал или ещё раз
-`source ~/.zshrc`. Если строка добавилась в `~/.zshrc` несколько раз — лишние дубли можно удалить,
+`source` свой rc-файл. Если строка добавилась несколько раз — лишние дубли можно удалить,
 достаточно одной.
-
-> Не `zsh`? Добавь ту же строку `export PATH="$HOME/bin:$PATH"` в конфиг своего shell
-> (`~/.bashrc` для bash) и перезапусти его.
 
 ---
 
@@ -291,6 +310,28 @@ docker volume rm claude-pyenv-versions claude-poetry-cache claude-npm-cache
 
 ---
 
+## Особенности Linux
+
+Окружение одинаковое (внутри контейнера всегда Ubuntu 24.04), различается только стык с хостом:
+
+| Что | macOS (Docker Desktop) | Linux (Docker Engine) |
+| --- | --- | --- |
+| Доступ к демону | Docker Desktop запущен | Пользователь в группе `docker` (см. [Предусловия](#предусловия)) |
+| Владелец файлов в `/workspace` | VirtioFS подменяет UID: файлы остаются твоими | Контейнер работает от `root` → **созданные им файлы принадлежат root** |
+| git внутри контейнера | Владелец совпадает, вопросов нет | UID хоста ≠ root → git ругался бы `detected dubious ownership`; в образе для этого прописан `safe.directory` |
+| Архитектура | arm64 (Apple Silicon) — тянется сама | обычно amd64 — тянется сама |
+
+Про владельца файлов: если Claude в контейнере создал новый файл, на Linux-хосте он будет
+`root:root`. Вернуть себе:
+
+```bash
+sudo chown -R "$USER:$USER" .
+```
+
+Ту же поправку можно сделать разово для всего проекта, если файлов накопилось много.
+
+---
+
 ## Devcontainer
 
 Образ можно использовать как базу devcontainer'а; логин общий с `claude-docker`. Готовый конфиг
@@ -302,6 +343,10 @@ docker volume rm claude-pyenv-versions claude-poetry-cache claude-npm-cache
 mkdir -p .devcontainer
 cp ~/.claude-docker/.devcontainer/devcontainer.json .devcontainer/
 ```
+
+> В отличие от `start.sh`, devcontainer'у неоткуда узнать путь к окружению — в `mounts` он зашит как
+> `${localEnv:HOME}/.claude-docker/state`. Если репозиторий склонирован в другой каталог, поправь
+> этот `source=` в скопированном `devcontainer.json` на свой путь до `state/`.
 
 Подключение: расширение **Dev Containers** → **Reopen in Container**, дальше `claude` в терминале
 (первый раз — `/login`). Отличия от лаунчера: контейнер персистентный (без `--rm`), «с нуля» —
@@ -327,7 +372,10 @@ venv в кэше Poetry не активируется автоматически
 
 | Симптом | Решение |
 | --- | --- |
-| `which claude-docker` пусто | Новый терминал или `source ~/.zshrc` |
+| `which claude-docker` пусто | Новый терминал или `source ~/.zshrc` (macOS) / `source ~/.bashrc` (Linux) |
+| `unable to prepare context: path "…/.claude-docker" not found` | Старый `start.sh` с захардкоженным `~/.claude-docker`. Обнови репозиторий: путь теперь вычисляется от самого скрипта |
+| `permission denied … /var/run/docker.sock` (Linux) | Пользователь не в группе `docker` — см. [Предусловия](#предусловия) |
+| Файлы проекта стали `root:root` (Linux) | Ожидаемо, см. [Особенности Linux](#особенности-linux): `sudo chown -R "$USER:$USER" .` |
 | Долгая первая сборка без прогресса | Идёт скачивание бинаря Claude (~180 МБ), подожди |
 | Просит логин каждый раз | Проверь `-e CLAUDE_CONFIG_DIR=/root/.claude` и монтирование `state` в `/root/.claude` |
 | Зовётся не тот python | В логах старта строка `🐍 Python: … [путь]` покажет активный бинарь — должен быть внутри `/root/.cache/pypoetry/virtualenvs/…`; проверь `echo $VIRTUAL_ENV` (непусто) |

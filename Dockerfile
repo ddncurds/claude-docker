@@ -49,6 +49,12 @@ ENV PATH="/root/.local/bin:$PATH"
 # (create=false тут нельзя: тогда Poetry ставит в системный python3.12, залоченный PEP 668.)
 ENV POETRY_VIRTUALENVS_IN_PROJECT=false
 
+# На Linux-хосте bind-mount сохраняет реальный UID владельца, а внутри контейнера мы root —
+# git видит чужого владельца и отказывается работать (`detected dubious ownership`).
+# На macOS этого не видно: VirtioFS отдаёт файлы от имени пользователя контейнера.
+RUN git config --global --add safe.directory /workspace \
+    && git config --global --add safe.directory '*'
+
 # Скрипты сессии запечены в образ (а не переданы inline в start.sh), поэтому
 # одна копия логики используется и лаунчером, и devcontainer'ом:
 #   setup-python-env.sh — общая подготовка venv (pyenv + poetry)
