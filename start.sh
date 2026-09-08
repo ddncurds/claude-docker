@@ -49,6 +49,25 @@ MCP_CONFIG="$ENV_DIR/mcp.json"
 MCP_MOUNT=()
 [ -f "$MCP_CONFIG" ] && MCP_MOUNT=(-v "$MCP_CONFIG:/root/mcp.json:ro")
 
+# Сервисы проекта (БД, Redis) обычно крутятся в docker на хосте. Внутри контейнера
+# localhost — это сам контейнер, поэтому ходить к ним надо по host.docker.internal.
+# На Docker Desktop это имя есть само; на Docker Engine его нужно завести вручную
+# (host-gateway = адрес хоста со стороны docker-сети).
+HOST_ALIAS=()
+[ "$(uname -s)" = "Linux" ] && HOST_ALIAS=(--add-host "host.docker.internal:host-gateway")
+
+# Переопределения окружения для контейнера (опционально): файл в формате KEY=value,
+# обычно одна строка вида DATABASE_HOST=host.docker.internal. Читает его docker CLI на
+# хосте, поэтому переменные попадают в окружение контейнера ДО старта питона и перебивают
+# .env проекта (переменные окружения приоритетнее dotenv-файла). Файл с кредами дев-стека,
+# в git не нужен; путь можно переопределить через CLAUDE_DOCKER_ENV_FILE.
+ENV_FILE="${CLAUDE_DOCKER_ENV_FILE:-$PROJECT_DIR/.env.claude-docker}"
+ENV_ARG=()
+if [ -f "$ENV_FILE" ]; then
+    ENV_ARG=(--env-file "$ENV_FILE")
+    echo "🧩 Env: подключаю переопределения из $ENV_FILE"
+fi
+
 # Логика сессии (подготовка venv + активация + exec claude) запечена в образ
 # как entrypoint.sh (Dockerfile CMD) — единая копия, общая с devcontainer'ом.
 docker run --rm -it \
@@ -59,6 +78,8 @@ docker run --rm -it \
     -v claude-pyenv-versions:/root/.pyenv/versions \
     -v claude-poetry-cache:/root/.cache/pypoetry \
     -v claude-npm-cache:/root/.npm \
+    ${HOST_ALIAS[@]+"${HOST_ALIAS[@]}"} \
+    ${ENV_ARG[@]+"${ENV_ARG[@]}"} \
     ${MCP_MOUNT[@]+"${MCP_MOUNT[@]}"} \
     -w /workspace \
     "$IMAGE"

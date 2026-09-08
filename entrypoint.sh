@@ -25,6 +25,14 @@ if setup-python-env.sh; then
     echo; echo "🐍 Python: $(python --version 2>&1) [$(command -v python)]"; echo
 fi
 
+# Сервисы проекта (БД, Redis) живут в docker на хосте: localhost внутри контейнера — это
+# сам контейнер, поэтому в адресах нужен host.docker.internal. Показываем, куда он смотрит
+# (на Linux имя заводит start.sh через --add-host; если его нет — просто молчим).
+HOST_IP="$(getent hosts host.docker.internal 2>/dev/null | head -n1 | cut -d' ' -f1)"
+if [ -n "$HOST_IP" ]; then
+    echo "🌐 Хост: host.docker.internal → $HOST_IP (по этому имени доступны сервисы проекта)"; echo
+fi
+
 # MCP-серверы: если start.sh примонтировал /root/mcp.json — подключаем его.
 # Без --strict-mcp-config, чтобы серверы из файла дополняли (а не заменяли)
 # всё, что уже настроено в state/.claude.json.

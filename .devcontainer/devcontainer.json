@@ -12,6 +12,11 @@
     "source=claude-npm-cache,target=/root/.npm,type=volume"
   ],
 
+  // host.docker.internal — адрес хоста изнутри контейнера (там опубликованы порты БД и
+  // Redis из compose проекта). На Docker Desktop имя есть само, на Docker Engine его
+  // заводит эта строка. Аналог --add-host в start.sh.
+  "runArgs": ["--add-host=host.docker.internal:host-gateway"],
+
   "containerEnv": {
     "CLAUDE_CONFIG_DIR": "/root/.claude"
   },
