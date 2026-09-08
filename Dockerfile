@@ -12,6 +12,10 @@ RUN apt-get update && apt-get install -y \
     \
     tshark tcpdump iproute2 \
     \
+    # клиенты для сервисов проекта, которые крутятся в docker на хосте
+    # (nc — проверка «порт открыт», psql/redis-cli — проверка коннекта и запросы)
+    netcat-openbsd postgresql-client redis-tools \
+    \
     # зависимости для сборки CPython через pyenv (компиляция из исходников;
     # make/gcc уже есть в build-essential выше)
     libssl-dev zlib1g-dev libbz2-dev libreadline-dev \
