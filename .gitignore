@@ -1,3 +1,5 @@
 state/
 .claude/.cc-writes/
 mcp.json
+/rules
+/skills
