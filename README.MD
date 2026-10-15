@@ -462,6 +462,20 @@ cp ~/.claude-docker/.devcontainer/devcontainer.json .devcontainer/
 - **Клиенты БД/кэша**: `psql`, `redis-cli`, `nc` — проверить коннект к сервисам проекта на хосте
   (см. [Сервисы проекта](#сервисы-проекта-бд-и-redis-в-docker)). Только клиенты, серверов в образе нет.
 - **Dev**: git, jq, ripgrep, tree, vim, build-essential.
+- **OpenSpec** ([openspec.dev](https://openspec.dev)) — спек-ориентированная разработка; CLI
+  `openspec` стоит глобально (npm-пакет `@fission-ai/openspec`, телеметрия выключена через
+  `OPENSPEC_TELEMETRY=0`). Автоматически в проект он **ничего не пишет**: инициализация —
+  твоя команда, один раз на проект.
+
+  ```bash
+  openspec init --tools claude   # создаст openspec/ + команды /opsx:* и скиллы в .claude/
+  openspec update                # обновить команды/скиллы под версию CLI (после пересборки образа)
+  openspec list                  # текущие change-предложения
+  ```
+
+  Файлы ложатся в `/workspace`, то есть в репозиторий на Mac'е — их видно в git и в команде.
+  Версия CLI фиксируется при сборке образа: чтобы подтянуть новую, пересобери образ
+  (см. [Обслуживание](#обслуживание)) и выполни в проекте `openspec update`.
 
 ---
 

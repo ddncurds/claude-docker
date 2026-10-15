@@ -36,6 +36,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# OpenSpec (https://openspec.dev) — CLI для спеков: `openspec init` раскладывает в проекте
+# openspec/ и команды /opsx:* со скиллами в .claude/. Ставим глобально через npm (нужен Node 20+,
+# он выше). Инициализацию проекта НЕ делаем автоматом: это правки в репозитории на Mac'е,
+# их запускает человек (`openspec init --tools claude`).
+# Телеметрия выключена: контейнер одноразовый, статистику отсюда слать незачем.
+ENV OPENSPEC_TELEMETRY=0
+RUN npm install -g @fission-ai/openspec@latest \
+    && npm cache clean --force
+
 # pyenv — управление версиями Python. Компиляция кэшируется в volume /root/.pyenv/versions.
 ENV PYENV_ROOT=/root/.pyenv
 RUN curl -fsSL https://pyenv.run | bash
