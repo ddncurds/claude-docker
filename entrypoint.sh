@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Команда контейнера (Dockerfile CMD) для одноразового лаунчера start.sh:
 # баннер → проверка логина → подготовка venv (setup-python-env.sh) →
-# активация venv → exec claude. Devcontainer это НЕ выполняет — он зовёт
-# setup-python-env.sh напрямую из postCreateCommand.
+# активация venv → exec claude. С флагом --shell: баннер → exec bash, без venv
+# и без claude. Devcontainer это НЕ выполняет — он зовёт setup-python-env.sh
+# напрямую из postCreateCommand.
 set -uo pipefail
 
 echo
@@ -15,9 +16,14 @@ if [ ! -f /root/.claude/.credentials.json ]; then
     echo
 fi
 
+# Режим --shell (claude-docker --shell): только баннер и адрес хоста, дальше bash.
+# Окружение не настраиваем и Claude не стартуем — пользователь ставит всё руками.
+SHELL_MODE=0
+[ "${1:-}" = "--shell" ] && SHELL_MODE=1
+
 # setup-python-env.sh возвращает 0, только если venv готов к активации
 # (есть pyproject.toml и Python встал). Иначе просто стартуем Claude.
-if setup-python-env.sh; then
+if [ "$SHELL_MODE" = 0 ] && setup-python-env.sh; then
     # активируем venv: python/pytest/ruff видят его напрямую
     VENV="$(poetry env info --path)"
     export VIRTUAL_ENV="$VENV"
@@ -31,6 +37,13 @@ fi
 HOST_IP="$(getent hosts host.docker.internal 2>/dev/null | head -n1 | cut -d' ' -f1)"
 if [ -n "$HOST_IP" ]; then
     echo "🌐 Хост: host.docker.internal → $HOST_IP (по этому имени доступны сервисы проекта)"; echo
+fi
+
+if [ "$SHELL_MODE" = 1 ]; then
+    echo "🐚 Shell: окружение не настроено, Claude не запущен."
+    echo "   Python: poetry env use … && poetry install --no-root; Claude: claude. Выход — exit."
+    echo
+    exec bash
 fi
 
 # MCP-серверы: если start.sh примонтировал /root/mcp.json — подключаем его.

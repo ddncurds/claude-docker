@@ -111,7 +111,7 @@ git clone https://github.com/ddncurds/claude-docker.git ~/.claude-docker
 | --- | --- |
 | `Dockerfile` | Образ: Ubuntu 24.04 + CLI-инструменты + pyenv + poetry + Claude Code |
 | `start.sh` | Лаунчер: собирает образ при отсутствии, поднимает одноразовый контейнер, монтирует проект/состояние/кэши |
-| `entrypoint.sh` | Команда контейнера: баннер → проверка логина → подготовка venv → активация → `exec claude` |
+| `entrypoint.sh` | Команда контейнера: баннер → проверка логина → подготовка venv → активация → `exec claude` (с `--shell` — баннер → `exec bash`) |
 | `setup-python-env.sh` | Подготовка venv (pyenv + poetry). Общая копия для лаунчера и devcontainer |
 | `.dockerignore` | Исключает `state/` и `mcp.json` из контекста сборки |
 
@@ -237,6 +237,28 @@ claude-docker
 ```
 
 Выход — `exit` или Ctrl-D: контейнер удаляется (`--rm`), состояние и кэши остаются.
+
+### Режим shell: контейнер без Claude и без автонастройки
+
+```bash
+claude-docker --shell    # или -s
+```
+
+Открывает `bash` в том же контейнере (те же маунты, кэши, `.env.claude-docker`, `mcp.json`), но
+`entrypoint.sh` **не** зовёт `setup-python-env.sh` и **не** стартует Claude. Нужен для сложных
+проектов (например, фронт + бэкенд в одном репозитории), где автонастройка venv по корневому
+`pyproject.toml` не подходит и окружение проще поставить руками:
+
+```bash
+cd backend && poetry env use "$(pyenv which python)" && poetry install --no-root
+claude    # Claude можно запустить вручную из этого же шелла
+```
+
+- venv в этом режиме **не** активирован: `VIRTUAL_ENV` пуст, `python` — системный/pyenv. Активируй
+  сам (`source "$(poetry env info --path)/bin/activate"`) или зови через `poetry run`.
+- Флаг обрабатывает `entrypoint.sh` внутри образа — после обновления репозитория пересобери образ
+  (см. [Обслуживание](#обслуживание)), иначе старый образ проигнорирует `--shell` и запустит Claude.
+- `claude-docker --help` — список аргументов; неизвестный аргумент — ошибка.
 
 ---
 

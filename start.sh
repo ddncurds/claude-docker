@@ -4,6 +4,27 @@ set -euo pipefail
 PROJECT_DIR="$(pwd)"
 IMAGE="claude-code-dev"
 
+# Режим сессии. По умолчанию — Claude с автонастройкой Python. С --shell — голый bash
+# без setup-python-env.sh и без claude: для сложных проектов (фронт + бэкенд), где
+# окружение проще поставить руками. Claude потом можно запустить из шелла командой `claude`.
+MODE="claude"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -s|--shell) MODE="shell" ;;
+        -h|--help)
+            echo "Usage: claude-docker [--shell]"
+            echo "  (без аргументов)  контейнер + настройка venv + Claude Code"
+            echo "  -s, --shell       контейнер с bash: без настройки окружения и без Claude"
+            exit 0
+            ;;
+        *)
+            echo "❌ Unknown argument: $1 (see claude-docker --help)" >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
+
 # Каталог окружения = каталог самого скрипта, а НЕ захардкоженный ~/.claude-docker:
 # репозиторий можно клонировать куда угодно (на Linux это обычно не ~/.claude-docker),
 # и всё равно найдутся Dockerfile, state/ и mcp.json. Симлинки (~/bin/claude-docker)
@@ -70,6 +91,9 @@ fi
 
 # Логика сессии (подготовка venv + активация + exec claude) запечена в образ
 # как entrypoint.sh (Dockerfile CMD) — единая копия, общая с devcontainer'ом.
+# В режиме --shell передаём entrypoint.sh флаг явно (это перебивает CMD образа).
+CMD_ARGS=()
+[ "$MODE" = "shell" ] && CMD_ARGS=(entrypoint.sh --shell)
 docker run --rm -it \
     --name "claude-${SAFE_NAME}-$$" \
     -v "$PROJECT_DIR:/workspace" \
@@ -82,4 +106,4 @@ docker run --rm -it \
     ${ENV_ARG[@]+"${ENV_ARG[@]}"} \
     ${MCP_MOUNT[@]+"${MCP_MOUNT[@]}"} \
     -w /workspace \
-    "$IMAGE"
+    "$IMAGE" ${CMD_ARGS[@]+"${CMD_ARGS[@]}"}
